@@ -54,6 +54,7 @@ def send_email(new_jobs):
         server.send_message(msg)
 
 def monitor():
+     print("Checking for new jobs...")  
     global previous_job_ids
     current_jobs = scrape_jobs()
     current_ids = [job["ID"] for job in current_jobs]
@@ -64,6 +65,8 @@ def monitor():
         print(f"Found {len(new_jobs)} new jobs!")
         send_email(new_jobs)
         previous_job_ids = current_ids  # Update for this run
+         else:
+        print("No new jobs.")  # Add this line!
 
 if __name__ == "__main__":
     monitor()
