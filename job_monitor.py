@@ -54,10 +54,20 @@ def send_email(new_jobs):
         server.send_message(msg)
 
 def monitor():
-     print("Checking for new jobs...")  
-    global previous_job_ids
+    # REMOVE THE while True LOOP!
     current_jobs = scrape_jobs()
     current_ids = [job["ID"] for job in current_jobs]
+    
+    new_jobs = [job for job in current_jobs if job["ID"] not in previous_job_ids]
+    
+    if new_jobs:
+        send_email(new_jobs)
+        previous_job_ids = current_ids
+    else:
+        print("No new jobs.")
+
+if __name__ == "__main__":
+    monitor()  # Runs once and exits
     
     new_jobs = [job for job in current_jobs if job["ID"] not in previous_job_ids]
     
