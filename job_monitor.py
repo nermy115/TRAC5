@@ -80,9 +80,3 @@ def monitor():
         previous_job_ids = current_ids  # Update for this run
     else:
         print("No new jobs.")
-
-    else:
-        print("No new jobs.")
-
-if __name__ == "__main__":
-    monitor()  # Runs once and exits
