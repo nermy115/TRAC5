@@ -62,12 +62,25 @@ def monitor():
     current_jobs = scrape_jobs()
     current_ids = [job["ID"] for job in current_jobs]
     
+    # Debug: Print the current job IDs and full job details
+    print("Current job IDs:", current_ids)
+    print("All current jobs:")
+    for job in current_jobs:
+        print(f"ID: {job['ID']}, Title: {job['Title']}")
+    
     new_jobs = [job for job in current_jobs if job["ID"] not in previous_job_ids]
     
+    # Debug: Print details of the jobs considered new
     if new_jobs:
+        print("New jobs detected:")
+        for job in new_jobs:
+            print(f"ID: {job['ID']}, Title: {job['Title']}")
         print(f"Found {len(new_jobs)} new jobs!")
         send_email(new_jobs)
         previous_job_ids = current_ids  # Update for this run
+    else:
+        print("No new jobs.")
+
     else:
         print("No new jobs.")
 
