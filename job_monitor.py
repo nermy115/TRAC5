@@ -14,21 +14,25 @@ URL = "https://www.healthjobsuk.com/job_list?JobSearch_re=MedicalAndDental&_sort
 previous_job_ids = []
 
 def scrape_jobs():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/91.0.4472.124 Safari/537.36")
+    }
     response = requests.get(URL, headers=headers)
     soup = BeautifulSoup(response.content, 'html.parser')
     
     jobs = []
-    job_listings = soup.find_all('li', class_='hj-job-list-entry')  # Update selector
+    job_listings = soup.find_all('li', class_='hj-job-list-entry')  # Update selector as needed
     
     for job in job_listings:
-        # Extract unique job ID (adjust based on HTML)
+        # Extract unique job ID (adjust based on HTML structure)
         title_tag = job.find('a', class_='hj-jobtitle')
-        link = title_tag['href']
-        job_id = link.split('/')[-1]  # Example: Extract from URL
-        
-        title = title_tag.text.strip()
-        jobs.append({"ID": job_id, "Title": title, "Link": link})
+        if title_tag:
+            link = title_tag.get('href', '')
+            job_id = link.split('/')[-1]  # Example: Extract from URL
+            title = title_tag.text.strip()
+            jobs.append({"ID": job_id, "Title": title, "Link": link})
     
     return jobs
 
@@ -44,7 +48,7 @@ def send_email(new_jobs):
 
     msg.attach(MIMEText(body, 'plain'))
     
-    # Hotmail SMTP
+    # Hotmail SMTP settings
     SMTP_SERVER = "smtp-mail.outlook.com"
     SMTP_PORT = 587
     
@@ -54,20 +58,9 @@ def send_email(new_jobs):
         server.send_message(msg)
 
 def monitor():
-    # REMOVE THE while True LOOP!
+    global previous_job_ids  # Needed to modify the global variable
     current_jobs = scrape_jobs()
     current_ids = [job["ID"] for job in current_jobs]
-    
-    new_jobs = [job for job in current_jobs if job["ID"] not in previous_job_ids]
-    
-    if new_jobs:
-        send_email(new_jobs)
-        previous_job_ids = current_ids
-    else:
-        print("No new jobs.")
-
-if __name__ == "__main__":
-    monitor()  # Runs once and exits
     
     new_jobs = [job for job in current_jobs if job["ID"] not in previous_job_ids]
     
@@ -75,8 +68,8 @@ if __name__ == "__main__":
         print(f"Found {len(new_jobs)} new jobs!")
         send_email(new_jobs)
         previous_job_ids = current_ids  # Update for this run
-         else:
-        print("No new jobs.")  # Add this line!
+    else:
+        print("No new jobs.")
 
 if __name__ == "__main__":
-    monitor()
+    monitor()  # Runs once and exits
