@@ -28,10 +28,16 @@ jobs:
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
         run: python job_monitor.py
 
-      - name: Commit new job IDs
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git add jobs.txt
-          git commit -m "Update tracked job IDs" || echo "No changes to commit"
-          git push
+     - name: Commit new job IDs
+  run: |
+    git config --global user.name "GitHub Actions"
+    git config --global user.email "actions@github.com"
+    
+    # Check if jobs.txt exists before committing
+    if [ -f "jobs.txt" ]; then
+      git add jobs.txt
+      git commit -m "Update tracked job IDs" || echo "No changes to commit"
+      git push
+    else
+      echo "No jobs.txt to commit."
+    fi
