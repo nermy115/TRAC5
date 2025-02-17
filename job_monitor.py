@@ -23,7 +23,7 @@ def save_current_job_ids(job_ids):
 
 def scrape_jobs():
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     response = requests.get(URL, headers=headers)
     soup = BeautifulSoup(response.content, 'html.parser')
@@ -32,6 +32,18 @@ def scrape_jobs():
     job_listings = soup.find_all('li', class_=lambda x: x and x.startswith('hj-job'))
     
     for job_li in job_listings:
+        # Check category first
+        category_div = job_li.find('div', class_='hj-sector')
+        if not category_div:
+            continue  # Skip jobs without category info
+            
+        category = category_div.text.strip().lower()
+        allowed_keywords = ['medical', 'dental', 'doctor', 'dentist']
+        if not any(keyword in category for keyword in allowed_keywords):
+            print(f"⚠️ Skipped non-medical/dental job: {category}")
+            continue
+
+        # Extract job details
         link_tag = job_li.find('a')
         if not link_tag:
             continue
@@ -52,26 +64,26 @@ def scrape_jobs():
 def send_email(new_jobs):
     try:
         msg = MIMEMultipart()
-        msg['Subject'] = f"New NHS Jobs: {len(new_jobs)}"
+        msg['Subject'] = f"New NHS Medical/Dental Jobs: {len(new_jobs)}"
         msg['From'] = EMAIL
         msg['To'] = EMAIL
 
-        body = "🚨 New Job Alerts:\n\n"
+        body = "📌 **Medical/Dental Job Alerts**\n\n"
         for job in new_jobs:
-            body += f"▸ {job['Title']}\n{job['Link']}\n\n"
-        body += "Cheers,\nYour Job Monitor 🤖"
+            body += f"► {job['Title']}\n{job['Link']}\n{'─'*40}\n"
+        body += "\nEnd of alerts 🎯"
 
         msg.attach(MIMEText(body, 'plain'))
         
-        # Gmail SMTP configuration
+        # Gmail SMTP
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(EMAIL, APP_PASSWORD)
             server.send_message(msg)
-            print("✅ Email notification sent!")
+            print(f"✅ Sent {len(new_jobs)} medical/dental jobs!")
     
     except Exception as e:
-        print(f"❌ Failed to send email: {str(e)}")
+        print(f"❌ Critical error: {str(e)}")
         raise
 
 def monitor():
@@ -82,14 +94,13 @@ def monitor():
     new_jobs = [job for job in current_jobs if job["ID"] not in previous_job_ids]
     
     if new_jobs:
-        print(f"Found {len(new_jobs)} new positions")
         send_email(new_jobs)
     else:
-        print("No new jobs detected")
+        print("✅ No new medical/dental jobs detected")
     
     save_current_job_ids(current_ids)
 
 if __name__ == "__main__":
     if not EMAIL or not APP_PASSWORD:
-        raise ValueError("Missing email credentials in environment variables")
+        raise ValueError("Missing credentials in environment variables")
     monitor()
