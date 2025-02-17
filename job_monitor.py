@@ -8,56 +8,85 @@ import smtplib
 # Configuration
 EMAIL = os.environ["EMAIL"]
 APP_PASSWORD = os.environ["APP_PASSWORD"]
-URL = "https://www.healthjobsuk.com/job_list?JobSearch_re=MedicalAndDental&_sort=newest&_pg=1"
 
 def load_previous_job_ids():
     try:
         with open("jobs.txt", "r") as f:
-            return f.read().splitlines()
+            return set(f.read().splitlines())  # Use set for faster lookups
     except FileNotFoundError:
-        return []
+        return set()
 
 def save_current_job_ids(job_ids):
     with open("jobs.txt", "w") as f:
         f.write("\n".join(job_ids))
 
-def scrape_jobs():
+def init_session():
+    """Submit category form to filter Medical/Dental jobs"""
+    session = requests.Session()
+    
+    # Configure headers to mimic browser
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Content-Type": "application/x-www-form-urlencoded"
     }
-    response = requests.get(URL, headers=headers)
-    soup = BeautifulSoup(response.content, 'html.parser')
     
-    jobs = []
-    job_listings = soup.find_all('li', class_=lambda x: x and x.startswith('hj-job'))
+    # Submit category selection form (HealthcareSector=14 → Medical+Dental)
+    form_data = {
+        "HealthcareSector": "14",
+        "JobType": "",
+        "Country": "",
+        "JobLevel": "",
+        "Keyword": ""
+    }
     
-    for job_li in job_listings:
-        # Check category first
-        category_div = job_li.find('div', class_='hj-sector')
-        if not category_div:
-            continue  # Skip jobs without category info
-            
-        category = category_div.text.strip().lower()
-        allowed_keywords = ['medical', 'dental', 'doctor', 'dentist']
-        if not any(keyword in category for keyword in allowed_keywords):
-            print(f"⚠️ Skipped non-medical/dental job: {category}")
-            continue
+    session.post(
+        "https://www.healthjobsuk.com/select_sector",
+        data=form_data,
+        headers=headers
+    )
+    
+    return session
 
-        # Extract job details
-        link_tag = job_li.find('a')
-        if not link_tag:
-            continue
+def scrape_all_pages(session):
+    """Scrape jobs from all paginated results"""
+    base_url = "https://www.healthjobsuk.com/job_list?JobSearch_re=MedicalAndDental&_sort=newest&_pg={page}"
+    jobs = []
+    page = 1
+    
+    while True:
+        url = base_url.format(page=page)
+        try:
+            response = session.get(url)
+            response.raise_for_status()
             
-        href = link_tag.get('href', '')
-        job_id = href.split('/')[-1].split('?')[0]
-        title_div = link_tag.find('div', class_='hj-jobtitle')
-        title = title_div.text.strip() if title_div else "Untitled Position"
-        
-        jobs.append({
-            "ID": job_id,
-            "Title": title,
-            "Link": f"https://www.healthjobsuk.com{href}"
-        })
+            soup = BeautifulSoup(response.text, 'html.parser')
+            job_elements = soup.find_all('li', class_=lambda x: x and x.startswith('hj-job'))
+            
+            if not job_elements:
+                break  # No more pages
+
+            # Extract job details
+            for job_li in job_elements:
+                link = job_li.find('a')
+                if not link:
+                    continue
+                
+                href = link.get('href', '')
+                job_id = href.split('/')[-1].split('?')[0].strip()
+                title = link.find('div', class_='hj-jobtitle').text.strip() if link.find('div', class_='hj-jobtitle') else "No Title"
+                
+                jobs.append({
+                    "ID": job_id,
+                    "Title": title,
+                    "Link": f"https://www.healthjobsuk.com{href}"
+                })
+
+            print(f"Scraped {len(job_elements)} jobs from page {page}")
+            page += 1
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Error fetching page {page}: {e}")
+            break
     
     return jobs
 
@@ -68,39 +97,43 @@ def send_email(new_jobs):
         msg['From'] = EMAIL
         msg['To'] = EMAIL
 
-        body = "📌 **Medical/Dental Job Alerts**\n\n"
-        for job in new_jobs:
-            body += f"► {job['Title']}\n{job['Link']}\n{'─'*40}\n"
-        body += "\nEnd of alerts 🎯"
+        body = "📌 **Medical & Dental Job Alerts**\n\n"
+        for idx, job in enumerate(new_jobs, 1):
+            body += f"{idx}. {job['Title']}\n{job['Link']}\n\n"
+        body += "End of alerts 🚨"
 
         msg.attach(MIMEText(body, 'plain'))
         
-        # Gmail SMTP
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
             server.login(EMAIL, APP_PASSWORD)
             server.send_message(msg)
-            print(f"✅ Sent {len(new_jobs)} medical/dental jobs!")
+            print(f"⚠️ Alert: Sent {len(new_jobs)} new jobs!")
     
     except Exception as e:
-        print(f"❌ Critical error: {str(e)}")
+        print(f"Email failed: {str(e)}")
         raise
 
 def monitor():
-    previous_job_ids = load_previous_job_ids()
-    current_jobs = scrape_jobs()
-    current_ids = [job["ID"] for job in current_jobs]
+    # Initialize session with Medical/Dental filter
+    session = init_session()
     
-    new_jobs = [job for job in current_jobs if job["ID"] not in previous_job_ids]
+    # Get previous and current jobs
+    previous_ids = load_previous_job_ids()
+    current_jobs = scrape_all_pages(session)
+    current_ids = {job["ID"] for job in current_jobs}
+    
+    # Find new jobs
+    new_jobs = [job for job in current_jobs if job["ID"] not in previous_ids]
     
     if new_jobs:
         send_email(new_jobs)
     else:
-        print("✅ No new medical/dental jobs detected")
+        print("✅ All jobs are up-to-date in Medical/Dental")
     
     save_current_job_ids(current_ids)
 
 if __name__ == "__main__":
     if not EMAIL or not APP_PASSWORD:
-        raise ValueError("Missing credentials in environment variables")
+        raise ValueError("Missing EMAIL or APP_PASSWORD in environment variables")
     monitor()
