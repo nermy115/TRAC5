@@ -80,6 +80,7 @@ def monitor():
         save_current_job_ids(current_ids)
     else:
         print("✅ No new jobs.")
+        save_current_job_ids(current_ids)
 
 if __name__ == "__main__":
     if not EMAIL or not APP_PASSWORD:
