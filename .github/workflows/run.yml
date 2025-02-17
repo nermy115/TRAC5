@@ -43,4 +43,3 @@ jobs:
           else
             echo "No jobs.txt to commit."
           fi
-      
