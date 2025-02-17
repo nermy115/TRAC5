@@ -22,20 +22,33 @@ def save_current_job_ids(job_ids):
         f.write("\n".join(job_ids))
 
 def scrape_jobs():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
     response = requests.get(URL, headers=headers)
     soup = BeautifulSoup(response.content, 'html.parser')
     
     jobs = []
-    job_listings = soup.find_all('li', class_='hj-job-list-entry')
+    # Find all <li> elements starting with "hj-job" in class
+    job_listings = soup.find_all('li', class_=lambda x: x and x.startswith('hj-job'))
     
-    for job in job_listings:
-        title_tag = job.find('a', class_='hj-jobtitle')
-        if title_tag:
-            link = title_tag.get('href', '')
-            job_id = link.split('/')[-1]
-            title = title_tag.text.strip()
-            jobs.append({"ID": job_id, "Title": title, "Link": link})
+    for job_li in job_listings:
+        # Get the direct <a> tag within the list item
+        link_tag = job_li.find('a')
+        if not link_tag:
+            continue
+            
+        # Extract job ID and title
+        href = link_tag.get('href', '')
+        job_id = href.split('/')[-1].split('?')[0]  # Remove query parameters
+        title_div = link_tag.find('div', class_='hj-jobtitle')
+        title = title_div.text.strip() if title_div else "Untitled Position"
+        
+        jobs.append({
+            "ID": job_id,
+            "Title": title,
+            "Link": f"https://www.healthjobsuk.com{href}"
+        })
     
     return jobs
 
@@ -46,13 +59,13 @@ def send_email(new_jobs):
         msg['From'] = EMAIL
         msg['To'] = EMAIL
 
-        body = "New jobs:\n\n"
+        body = "New jobs found:\n\n"
         for job in new_jobs:
-            body += f"Title: {job['Title']}\nLink: {job['Link']}\n\n"
+            body += f"★ {job['Title']}\n🔗 {job['Link']}\n\n"
 
         msg.attach(MIMEText(body, 'plain'))
         
-        # Outlook/Hotmail SMTP
+        # Outlook/Hotmail SMTP configuration
         SMTP_SERVER = "smtp-mail.outlook.com"
         SMTP_PORT = 587
         
@@ -65,7 +78,7 @@ def send_email(new_jobs):
     
     except Exception as e:
         print(f"❌ Email failed: {str(e)}")
-        raise  # Fail workflow to show error
+        raise  # Fail workflow for visibility
 
 def monitor():
     previous_job_ids = load_previous_job_ids()
@@ -77,12 +90,13 @@ def monitor():
     if new_jobs:
         print(f"🚨 Found {len(new_jobs)} new jobs!")
         send_email(new_jobs)
-        save_current_job_ids(current_ids)
     else:
         print("✅ No new jobs.")
-        save_current_job_ids(current_ids)
+    
+    # Always update the tracking file
+    save_current_job_ids(current_ids)
 
 if __name__ == "__main__":
     if not EMAIL or not APP_PASSWORD:
-        raise ValueError("Missing email credentials in environment variables!")
+        raise ValueError("❌ Missing email credentials in environment variables!")
     monitor()
