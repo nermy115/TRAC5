@@ -43,10 +43,3 @@ jobs:
           else
             echo "No jobs.txt to commit."
           fi
-
-- name: Upload Debug Files
-  uses: actions/upload-artifact@v3
-  if: always()  # Forces upload even if script fails
-  with:
-    name: debug-pages  # Name of the artifact
-    path: debug_page_*.html  # Path to debug files
