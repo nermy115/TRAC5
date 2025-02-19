@@ -26,16 +26,7 @@ jobs:
         env:
           EMAIL: ${{ secrets.EMAIL }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-        run: python job_monitor.py || echo "Script exited with error, continuing..."
-
-      # ▼▼▼ ADD THIS BLOCK RIGHT HERE ▼▼▼
-      - name: Upload Debug HTML Files
-        uses: actions/upload-artifact@v3
-        if: always()  # Upload even if job fails
-        with:
-          name: debug-pages
-          path: debug_page_*.html
-      # ▲▲▲ ABOVE BLOCK ADDED ▲▲▲
+        run: python job_monitor.py
 
       - name: Commit new job IDs
         run: |
