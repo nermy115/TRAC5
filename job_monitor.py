@@ -1,9 +1,15 @@
 import os
-import requests
-from bs4 import BeautifulSoup
+import time
+import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import smtplib
+from bs4 import BeautifulSoup
+
+# Selenium Imports
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from webdriver_manager.chrome import ChromeDriverManager
 
 # --- Configuration ---
 EMAIL = os.environ["EMAIL"]
@@ -23,58 +29,78 @@ def save_current_job_ids(job_ids):
         f.write("\n".join(job_ids))
 
 def scrape_all_pages():
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Content-Type": "application/x-www-form-urlencoded"
-    })
-    
     jobs = []
-    page = 1
     
+    # --- Selenium Setup ---
+    options = webdriver.ChromeOptions()
+    options.add_argument("--headless")
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    
+    # Open the base URL
+    driver.get(BASE_URL)
+    time.sleep(2)  # Allow page to load
+
+    # --- Simulate Clicking the Search Button ---
+    try:
+        # Adjust the XPath if needed. This selector looks for an input with type "submit" and value "Search".
+        search_button = driver.find_element(By.XPATH, "//input[@type='submit' and @value='Search']")
+        search_button.click()
+        print("✅ Clicked the Search button.")
+    except Exception as e:
+        print("🚨 Error finding or clicking the search button:", e)
+        driver.quit()
+        return jobs
+
+    # Wait for the results page to load
+    time.sleep(3)
+
+    # --- Pagination and Scraping ---
+    page = 1
     while True:
-        # Submit form with search parameters
-        form_data = {
-            "JobSearch_Submit": "Search",
-            "_pg": str(page),
-            "_sort": "newest",
-            "JobSearch.re": "MedicalAndDental"  # Verify this in page HTML
-        }
-        
-        print(f"\n🔍 Pressing Search (Page {page})...")
-        response = session.post(BASE_URL, data=form_data)
-        response.raise_for_status()
-        
-        # Save debug HTML for manual inspection
-        with open(f"debug_page_{page}.html", "w") as f:
-            f.write(response.text)
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        job_listings = soup.select('li.hj-job-result')  # Update this selector
-        
-        print(f"📄 Found {len(job_listings)} jobs on page {page}")
-        
+        time.sleep(2)
+        html = driver.page_source
+
+        # Save debug HTML for manual inspection (if needed)
+        debug_filename = f"debug_page_{page}.html"
+        with open(debug_filename, "w", encoding="utf-8") as f:
+            f.write(html)
+        print(f"📄 Saved debug HTML for page {page} as '{debug_filename}'.")
+
+        soup = BeautifulSoup(html, 'html.parser')
+        # Update this selector if the page structure changes
+        job_listings = soup.select('li.hj-job-result')
+        print(f"🔍 Found {len(job_listings)} jobs on page {page}")
+
         if not job_listings:
             break
 
-        # Process each job listing
         for job in job_listings:
             link_tag = job.find('a', class_='hj-job-link')
             if not link_tag:
                 continue
-            
-            href = link_tag['href']
+
+            href = link_tag.get('href', '')
             job_id = href.split('/')[-1]
-            title = job.find('div', class_='hj-jobtitle').text.strip()
-            
+            title_div = job.find('div', class_='hj-jobtitle')
+            title = title_div.text.strip() if title_div else "No Title"
+
             jobs.append({
                 "ID": job_id,
                 "Title": title,
                 "Link": f"https://www.healthjobsuk.com{href}"
             })
 
-        page += 1  # Next page
-    
+        # Try to click the "next" page button; adjust the selector if needed.
+        try:
+            next_button = driver.find_element(By.XPATH, "//a[contains(@class, 'next')]")
+            next_button.click()
+            print(f"➡️ Navigating to page {page + 1}...")
+            page += 1
+        except Exception as e:
+            print("✅ No next page found, ending pagination.")
+            break
+
+    driver.quit()
     return jobs
 
 def send_email(new_jobs):
@@ -85,12 +111,12 @@ def send_email(new_jobs):
     msg['Subject'] = f"New NHS Jobs: {len(new_jobs)} Found!"
     msg['From'] = EMAIL
     msg['To'] = EMAIL
-    
+
     body = "🚨 New Medical/Dental Jobs:\n\n"
     for job in new_jobs:
         body += f"- {job['Title']}\n   {job['Link']}\n\n"
     msg.attach(MIMEText(body, 'plain'))
-    
+
     try:
         with smtplib.SMTP("smtp.gmail.com", 587) as server:
             server.starttls()
@@ -104,14 +130,14 @@ def monitor():
     previous_ids = load_previous_job_ids()
     current_jobs = scrape_all_pages()
     current_ids = {job["ID"] for job in current_jobs}
-    
+
     new_jobs = [job for job in current_jobs if job["ID"] not in previous_ids]
-    
+
     if new_jobs:
         send_email(new_jobs)
     else:
         print("✅ No new jobs found")
-    
+
     save_current_job_ids(current_ids)
 
 # --- Main ---
