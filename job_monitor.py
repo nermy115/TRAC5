@@ -9,6 +9,8 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # Use webdriver_manager only when not running on GitHub Actions.
 if not os.getenv("GITHUB_ACTIONS"):
@@ -58,21 +60,22 @@ def scrape_all_pages():
     
     # --- Simulate Clicking the Search Button ---
     try:
-        # Adjust the XPath if needed; this looks for an input with type "submit" and value "Search"
         search_button = driver.find_element(By.XPATH, "//input[@type='submit' and @value='Search']")
         search_button.click()
         print("✅ Clicked the Search button.")
+        # Wait explicitly for a job result element to appear (adjust the selector as needed)
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "li.hj-job-result"))
+        )
     except Exception as e:
-        print("🚨 Error finding or clicking the search button:", e)
+        print("🚨 Error finding or clicking the search button or waiting for results:", e)
         driver.quit()
         return jobs
-
-    # Wait for the results page to load
-    time.sleep(3)
 
     # --- Pagination and Scraping ---
     page = 1
     while True:
+        # Optionally, wait for the job listings container to update
         time.sleep(2)
         html = driver.page_source
 
@@ -83,6 +86,7 @@ def scrape_all_pages():
         print(f"📄 Saved debug HTML for page {page} as '{debug_filename}'.")
 
         soup = BeautifulSoup(html, 'html.parser')
+        # Update this selector based on your inspection of debug_page_1.html
         job_listings = soup.select('li.hj-job-result')
         print(f"🔍 Found {len(job_listings)} jobs on page {page}")
 
@@ -111,6 +115,10 @@ def scrape_all_pages():
             next_button.click()
             print(f"➡️ Navigating to page {page + 1}...")
             page += 1
+            # Wait again for job listings to load on the new page
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "li.hj-job-result"))
+            )
         except Exception as e:
             print("✅ No next page found, ending pagination.")
             break
