@@ -1,2 +1,4 @@
 requests
 beautifulsoup4
+selenium==4.9.1
+webdriver-manager==3.8.6
