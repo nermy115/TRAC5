@@ -10,7 +10,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 
-# Only import webdriver_manager for non-GitHub Actions environments
+# Use webdriver_manager only when not running on GitHub Actions.
 if not os.getenv("GITHUB_ACTIONS"):
     from webdriver_manager.chrome import ChromeDriverManager
 
@@ -38,7 +38,6 @@ def scrape_all_pages():
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     
-    # Use system ChromeDriver on GitHub Actions; otherwise, use webdriver_manager locally.
     if os.getenv("GITHUB_ACTIONS"):
         driver = webdriver.Chrome(options=options)
     else:
@@ -47,10 +46,19 @@ def scrape_all_pages():
     # Open the base URL
     driver.get(BASE_URL)
     time.sleep(2)  # Allow page to load
-
+    
+    # --- Accept Cookie Consent ---
+    try:
+        consent_button = driver.find_element(By.ID, "onetrust-accept-btn-handler")
+        consent_button.click()
+        print("✅ Cookie consent accepted.")
+        time.sleep(1)  # Give a moment for the consent overlay to disappear
+    except Exception as e:
+        print("ℹ️ Cookie consent button not found or already handled:", e)
+    
     # --- Simulate Clicking the Search Button ---
     try:
-        # Adjust the XPath if needed; this example finds an input with type "submit" and value "Search".
+        # Adjust the XPath if needed; this looks for an input with type "submit" and value "Search"
         search_button = driver.find_element(By.XPATH, "//input[@type='submit' and @value='Search']")
         search_button.click()
         print("✅ Clicked the Search button.")
@@ -68,14 +76,13 @@ def scrape_all_pages():
         time.sleep(2)
         html = driver.page_source
 
-        # Save debug HTML for manual inspection (if needed)
+        # Save debug HTML for manual inspection
         debug_filename = f"debug_page_{page}.html"
         with open(debug_filename, "w", encoding="utf-8") as f:
             f.write(html)
         print(f"📄 Saved debug HTML for page {page} as '{debug_filename}'.")
 
         soup = BeautifulSoup(html, 'html.parser')
-        # Update this selector if the page structure changes
         job_listings = soup.select('li.hj-job-result')
         print(f"🔍 Found {len(job_listings)} jobs on page {page}")
 
