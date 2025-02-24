@@ -9,7 +9,10 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+
+# Only import webdriver_manager for non-GitHub Actions environments
+if not os.getenv("GITHUB_ACTIONS"):
+    from webdriver_manager.chrome import ChromeDriverManager
 
 # --- Configuration ---
 EMAIL = os.environ["EMAIL"]
@@ -35,15 +38,11 @@ def scrape_all_pages():
     options = webdriver.ChromeOptions()
     options.add_argument("--headless")
     
-    # Try installing ChromeDriver using webdriver-manager.
-    try:
-        driver_path = ChromeDriverManager().install()
-    except ValueError as e:
-        print("🚨 ChromeDriverManager error:", e)
-        # Fallback to a specific version known to work.
-        driver_path = ChromeDriverManager(version="132.0.0").install()
-    
-    driver = webdriver.Chrome(service=Service(driver_path), options=options)
+    # Use system ChromeDriver on GitHub Actions; otherwise, use webdriver_manager locally.
+    if os.getenv("GITHUB_ACTIONS"):
+        driver = webdriver.Chrome(options=options)
+    else:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     
     # Open the base URL
     driver.get(BASE_URL)
@@ -51,7 +50,7 @@ def scrape_all_pages():
 
     # --- Simulate Clicking the Search Button ---
     try:
-        # Adjust the XPath if needed; this looks for an input with type "submit" and value "Search".
+        # Adjust the XPath if needed; this example finds an input with type "submit" and value "Search".
         search_button = driver.find_element(By.XPATH, "//input[@type='submit' and @value='Search']")
         search_button.click()
         print("✅ Clicked the Search button.")
@@ -69,7 +68,7 @@ def scrape_all_pages():
         time.sleep(2)
         html = driver.page_source
 
-        # Save debug HTML for manual inspection
+        # Save debug HTML for manual inspection (if needed)
         debug_filename = f"debug_page_{page}.html"
         with open(debug_filename, "w", encoding="utf-8") as f:
             f.write(html)
