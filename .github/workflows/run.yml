@@ -1,50 +1,48 @@
 name: Job Scraper
-
 on:
   schedule:
-    - cron: "*/5 8-17 * * 1-5"  # Every 5 minutes from 8AM-5PM UTC, Mon-Fri
+    - cron: "*/5 8-17 * * 1-5"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+        uses: actions/checkout@v5
 
       - name: Install Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install requests beautifulsoup4
 
-      - name: Run scraper
+      - name: Run scraper every minute (5x)
         env:
           EMAIL: ${{ secrets.EMAIL }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-        run: python job_monitor.py || echo "Script failed but proceeding..."
+        run: |
+          for i in 1 2 3 4 5; do
+            echo "--- Check $i of 5 ---"
+            python job_monitor.py || echo "Script failed, continuing..."
+            if [ $i -lt 5 ]; then
+              sleep 55
+            fi
+          done
 
-      - name: Upload Debug Files
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: nhs-jobs-debug
-          path: debug_page_*.html
-
-      - name: Commit new job IDs
+      - name: Commit updated job IDs
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          
           if [ -f "jobs.txt" ]; then
             git add jobs.txt
-            git commit -m "Update tracked job IDs" || echo "No changes"
+            git diff --cached --quiet || git commit -m "Update tracked job IDs"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+            git pull --rebase origin main
             git push origin HEAD:${{ github.ref }}
-          else
-            echo "No jobs.txt to commit."
           fi
