@@ -147,6 +147,7 @@ def send_telegram(message: str):
         "text": message,
         "parse_mode": "Markdown"
     })
+    print(f"Telegram response: {response.status_code} - {response.text}")
 
 # ── Scrape job details ────────────────────────────────────────────────────────
 async def scrape_job_details(page, job_url: str) -> dict:
@@ -154,15 +155,15 @@ async def scrape_job_details(page, job_url: str) -> dict:
     await page.wait_for_timeout(2000)
 
     job_title = await page.title()
-    job_title = job_title.replace("| NHS Jobs", "").replace("| Trac", "").strip()
+    job_title = job_title.replace("Job vacancy:", "").replace("| trac.jobs", "").strip()
 
     try:
-        trust_name = await page.locator(".employer-name, .trust-name, h2").first.inner_text()
+        trust_name = await page.locator(".nhsuk-card__heading, h1, .job-title").first.inner_text()
     except:
         trust_name = "NHS Trust"
 
     try:
-        spec_text = await page.locator(".job-description, #jobDescription, main").first.inner_text()
+        spec_text = await page.locator("main").first.inner_text()
     except:
         spec_text = ""
 
