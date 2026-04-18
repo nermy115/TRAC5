@@ -1,0 +1,44 @@
+name: Auto Apply to NHS Jobs
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_url:
+        description: 'Trac job URL to apply to'
+        required: true
+        type: string
+  # Also triggered by your existing scraper workflow
+  repository_dispatch:
+    types: [new_job_found]
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements_apply.txt
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run application script
+        env:
+          TRAC_EMAIL: ${{ secrets.TRAC_EMAIL }}
+          TRAC_PASSWORD: ${{ secrets.TRAC_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          # Job URL comes from either manual trigger or repository_dispatch payload
+          JOB_URL="${{ github.event.inputs.job_url || github.event.client_payload.job_url }}"
+          echo "Applying to: $JOB_URL"
+          python trac_apply.py "$JOB_URL"
