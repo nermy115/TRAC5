@@ -26,9 +26,8 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 # ── Job title blocklist (skip consultant/senior grade posts) ──────────────────
 EXCLUDE_TITLES = [
     "consultant", "associate specialist", "specialty doctor",
-    "staff grade", "registrar", "spr", "gp principal",
-    "gp partner", "clinical director", "medical director",
-    "anaesthe", "anaesth", "surgeon", "surgery"
+    "gp principal", "gp partner", "clinical director", "medical director"
+    
 ]
 
 def is_excluded_job(title: str) -> bool:
