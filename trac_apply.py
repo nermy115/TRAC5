@@ -10,10 +10,10 @@ import os
 import sys
 import asyncio
 import requests
-import google.generativeai as genai
+from google import genai
 from playwright.async_api import async_playwright
 
-# ── Secrets (set these in GitHub Actions Secrets) ────────────────────────────
+# ── Secrets (set in GitHub Actions Secrets) ───────────────────────────────────
 TRAC_EMAIL       = os.environ["TRAC_EMAIL"]
 TRAC_PASSWORD    = os.environ["TRAC_PASSWORD"]
 GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
@@ -21,7 +21,19 @@ TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 # ── Configure Gemini ──────────────────────────────────────────────────────────
-genai.configure(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+# ── Job title blocklist (skip consultant/senior grade posts) ──────────────────
+EXCLUDE_TITLES = [
+    "consultant", "associate specialist", "specialty doctor",
+    "staff grade", "registrar", "spr", "gp principal",
+    "gp partner", "clinical director", "medical director",
+    "anaesthe", "anaesth", "surgeon", "surgery"
+]
+
+def is_excluded_job(title: str) -> bool:
+    title_lower = title.lower()
+    return any(word in title_lower for word in EXCLUDE_TITLES)
 
 # ── CV & Profile ──────────────────────────────────────────────────────────────
 CV_PROFILE = """
@@ -86,6 +98,10 @@ Use ONLY the CV information provided. Write in first person. Be specific, confid
 Never say she is underqualified. Never suggest aiming lower. Frame every gap as manageable.
 Always amplify her potential.
 
+IMPORTANT: Read the job specification carefully and mirror its exact language and criteria
+throughout the statement. If the person spec says "excellent communication skills", use
+those exact words when describing her experience. Match every essential criterion explicitly.
+
 Structure the response as exactly 12 numbered points covering:
 1. Opening hook - why this trust and role specifically (use the trust name from the job)
 2. NHS clinical experience - lead with Bedford attachments (STAR format)
@@ -109,18 +125,21 @@ CV DATA:
 
 # ── Generate supporting information via Gemini ────────────────────────────────
 def generate_supporting_info(job_title: str, trust_name: str, job_spec_text: str) -> str:
-    model = genai.GenerativeModel("gemini-2.0-flash")
     prompt = (
+        f"{TEMPLATE_2_SYSTEM}\n\n"
         f"Job Title: {job_title}\n"
         f"Trust: {trust_name}\n"
-        f"Job Specification:\n{job_spec_text[:3000]}\n\n"
+        f"Job Specification (use this to mirror language and match criteria):\n"
+        f"{job_spec_text[:4000]}\n\n"
         f"Write the 12-point supporting information statement for this specific job."
     )
-    full_prompt = TEMPLATE_2_SYSTEM + "\n\n" + prompt
-    response = model.generate_content(full_prompt)
+    response = client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=prompt
+    )
     return response.text
 
-# ── Send Telegram confirmation ────────────────────────────────────────────────
+# ── Send Telegram message ─────────────────────────────────────────────────────
 def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, json={
@@ -150,7 +169,7 @@ async def scrape_job_details(page, job_url: str) -> dict:
     return {
         "title": job_title,
         "trust": trust_name.strip(),
-        "spec": spec_text[:3000]
+        "spec": spec_text
     }
 
 # ── Log into Trac ─────────────────────────────────────────────────────────────
@@ -193,7 +212,7 @@ async def click_apply(page, job_url: str):
 
     raise Exception("Could not find Apply button")
 
-# ── Fill supporting information field ─────────────────────────────────────────
+# ── Fill supporting information ───────────────────────────────────────────────
 async def fill_application(page, supporting_info: str):
     await page.wait_for_timeout(2000)
 
@@ -270,6 +289,18 @@ async def apply_to_job(job_url: str):
             job = await scrape_job_details(page, job_url)
             print(f"Title: {job['title']}")
             print(f"Trust: {job['trust']}")
+
+            # Check if job should be skipped
+            if is_excluded_job(job["title"]):
+                msg = (
+                    f"⏭ *Job Skipped*\n\n"
+                    f"*Job:* {job['title']}\n"
+                    f"*Reason:* Title matches exclusion list\n"
+                    f"*URL:* {job_url}"
+                )
+                send_telegram(msg)
+                print(f"Skipped: {job['title']} (excluded title)")
+                return
 
             print("Generating supporting information via Gemini...")
             supporting_info = generate_supporting_info(
