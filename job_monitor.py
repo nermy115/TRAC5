@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 
 EMAIL        = os.environ["EMAIL"]
 APP_PASSWORD = os.environ["APP_PASSWORD"]
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]  # add this secret to TRAC5
+GITHUB_TOKEN = os.environ["GH_TOKEN"]  # add this secret to TRAC5
 
 BASE_URL = "https://www.healthjobsuk.com/job_list/s2"
 HEADERS = {
