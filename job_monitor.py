@@ -20,8 +20,6 @@ HEADERS = {
 EXCLUDE_TITLES = [
     "consultant",
     "associate specialist",
-    "specialty doctor",
-    "staff grade",
     "gp principal",
     "gp partner",
     "clinical director",
