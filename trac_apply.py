@@ -133,7 +133,7 @@ def generate_supporting_info(job_title: str, trust_name: str, job_spec_text: str
         f"Write the 12-point supporting information statement for this specific job."
     )
     response = client.models.generate_content(
-        model="gemini-2.0-flash",
+        model="gemini-1.5-flash",
         contents=prompt
     )
     return response.text
@@ -141,12 +141,12 @@ def generate_supporting_info(job_title: str, trust_name: str, job_spec_text: str
 # ── Send Telegram message ─────────────────────────────────────────────────────
 def send_telegram(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={
+    tg_response = requests.post(url, json={
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "Markdown"
     })
-    print(f"Telegram response: {response.status_code} - {response.text}")
+    print(f"Telegram response: {tg_response.status_code} - {tg_response.text}")
 
 # ── Scrape job details ────────────────────────────────────────────────────────
 async def scrape_job_details(page, job_url: str) -> dict:
