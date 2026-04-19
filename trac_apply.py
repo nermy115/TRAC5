@@ -133,7 +133,7 @@ def generate_supporting_info(job_title: str, trust_name: str, job_spec_text: str
         f"Write the 12-point supporting information statement for this specific job."
     )
     response = client.models.generate_content(
-        model="gemini-1.5-flash",
+        model="gemini-2.0-flash-lite",
         contents=prompt
     )
     return response.text
