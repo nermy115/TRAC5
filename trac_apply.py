@@ -144,7 +144,7 @@ def send_telegram(message: str):
     tg_response = requests.post(url, json={
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown"
+        
     })
     print(f"Telegram response: {tg_response.status_code} - {tg_response.text}")
 
@@ -174,13 +174,13 @@ async def scrape_job_details(page, job_url: str) -> dict:
 
 # ── Log into Trac ─────────────────────────────────────────────────────────────
 async def login_trac(page):
-    await page.goto("https://www.jobs.nhs.uk/candidate/login", wait_until="domcontentloaded")
-    await page.wait_for_timeout(2000)
-
-    await page.fill('input[name="username"], input[type="email"], #username', TRAC_EMAIL)
-    await page.fill('input[name="password"], input[type="password"], #password', TRAC_PASSWORD)
-    await page.click('button[type="submit"], input[type="submit"]')
+    await page.goto("https://www.trac.jobs/candidate/login", wait_until="domcontentloaded")
     await page.wait_for_timeout(3000)
+
+    await page.fill('input[name="UserName"], input[name="username"], input[type="email"]', TRAC_EMAIL)
+    await page.fill('input[name="Password"], input[name="password"], input[type="password"]', TRAC_PASSWORD)
+    await page.click('button[type="submit"], input[type="submit"], .btn-primary')
+    await page.wait_for_timeout(4000)
 
     if "login" in page.url.lower():
         raise Exception("Trac login failed - check TRAC_EMAIL and TRAC_PASSWORD secrets")
