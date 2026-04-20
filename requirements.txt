@@ -1,2 +1,3 @@
 requests
 beautifulsoup4
+groq>=0.9.0
