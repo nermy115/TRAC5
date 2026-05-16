@@ -3,6 +3,7 @@ import re
 import time
 import smtplib
 import requests
+from curl_cffi import requests as cffi_requests  # TLS-fingerprint impersonation
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
@@ -102,8 +103,11 @@ def save_current_job_ids(job_ids):
 # treat the empty list as authoritative (i.e. do not overwrite jobs.txt).
 def scrape_all_pages():
     jobs = []
-    session = requests.Session()
-    session.headers.update(HEADERS)
+    # curl_cffi impersonates Chrome's actual TLS handshake fingerprint,
+    # which a plain `requests` call can't fake. This is what gets past WAFs
+    # that fingerprint at the TLS layer (Cloudflare, etc.) even when your
+    # HTTP headers look perfect.
+    session = cffi_requests.Session(impersonate="chrome124")
 
     # Warm up the session by hitting the homepage first — picks up any cookies
     # the site sets, and makes the listing request look like a real browse.
