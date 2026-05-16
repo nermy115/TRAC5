@@ -3,10 +3,10 @@ import re
 import time
 import smtplib
 import requests
-from curl_cffi import requests as cffi_requests  # TLS-fingerprint impersonation
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 EMAIL        = os.environ["EMAIL"]
 APP_PASSWORD = os.environ["APP_PASSWORD"]
@@ -102,55 +102,90 @@ def save_current_job_ids(job_ids):
 # Returns (jobs, ok). `ok=False` means the fetch failed and the caller must NOT
 # treat the empty list as authoritative (i.e. do not overwrite jobs.txt).
 def scrape_all_pages():
+    """Use a real Chromium browser via Playwright. TRAC's WAF blocks plain
+    HTTP scrapers even with TLS impersonation, so we render the listing in
+    an actual browser. Returns (jobs, ok)."""
     jobs = []
-    # curl_cffi impersonates Chrome's actual TLS handshake fingerprint,
-    # which a plain `requests` call can't fake. This is what gets past WAFs
-    # that fingerprint at the TLS layer (Cloudflare, etc.) even when your
-    # HTTP headers look perfect.
-    session = cffi_requests.Session(impersonate="chrome124")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                # Hides one of the most obvious Playwright/Selenium fingerprints
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ],
+        )
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
+            locale="en-GB",
+            timezone_id="Europe/London",
+        )
+        # Real Chrome does NOT have navigator.webdriver === true. Strip the
+        # automation flag before any page script runs.
+        context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+        )
 
-    # Warm up the session by hitting the homepage first — picks up any cookies
-    # the site sets, and makes the listing request look like a real browse.
-    try:
-        session.get("https://www.healthjobsuk.com/", timeout=15)
-    except Exception as e:
-        print(f"⚠️  Homepage warm-up failed (continuing anyway): {e}")
+        page_obj = context.new_page()
 
-    page = 1
-    while True:
-        url = f"{BASE_URL}?_ts=1" if page == 1 else f"{BASE_URL}?_ts=1&_pg={page}"
+        # Warm up by visiting the homepage first.
         try:
-            response = session.get(url, timeout=20)
-            response.raise_for_status()
+            page_obj.goto(
+                "https://www.healthjobsuk.com/",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            time.sleep(1.5)  # let any anti-bot JS settle
         except Exception as e:
-            print(f"🚨 Failed to fetch page {page}: {e}")
-            return [], False  # signal failure to caller
+            print(f"⚠️  Homepage warm-up failed (continuing anyway): {e}")
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-        job_links = soup.find_all('a', href=re.compile(r'^/job/'))
-        print(f"🔍 Found {len(job_links)} jobs on page {page}")
+        page_num = 1
+        while True:
+            url = f"{BASE_URL}?_ts=1" if page_num == 1 else f"{BASE_URL}?_ts=1&_pg={page_num}"
+            try:
+                response = page_obj.goto(url, wait_until="domcontentloaded", timeout=30000)
+                status = response.status if response else 0
+                if status >= 400:
+                    print(f"🚨 Failed to fetch page {page_num}: HTTP {status}")
+                    browser.close()
+                    return [], False
+                html = page_obj.content()
+            except Exception as e:
+                print(f"🚨 Failed to fetch page {page_num}: {e}")
+                browser.close()
+                return [], False
 
-        if not job_links:
-            break
+            soup = BeautifulSoup(html, 'html.parser')
+            job_links = soup.find_all('a', href=re.compile(r'^/job/'))
+            print(f"🔍 Found {len(job_links)} jobs on page {page_num}")
 
-        for link in job_links:
-            href = link.get('href', '').split('?')[0]
-            match = re.search(r'-(v\d+)$', href)
-            if not match:
-                continue
-            job_id = match.group(1)
-            title = link.get('title') or link.text.strip().split('\n')[0]
-            jobs.append({
-                "ID": job_id,
-                "Title": title,
-                "Link": f"https://www.healthjobsuk.com{href}"
-            })
+            if not job_links:
+                break
 
-        if not soup.find('a', title="Next page"):
-            break
-        page += 1
-        time.sleep(1.0)
+            for link in job_links:
+                href = link.get('href', '').split('?')[0]
+                match = re.search(r'-(v\d+)$', href)
+                if not match:
+                    continue
+                job_id = match.group(1)
+                title = link.get('title') or link.text.strip().split('\n')[0]
+                jobs.append({
+                    "ID": job_id,
+                    "Title": title,
+                    "Link": f"https://www.healthjobsuk.com{href}"
+                })
 
+            if not soup.find('a', title="Next page"):
+                break
+            page_num += 1
+            time.sleep(1.0)
+
+        browser.close()
     return jobs, True
 
 # ── Send email ────────────────────────────────────────────────────────────────
