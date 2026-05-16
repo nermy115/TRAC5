@@ -22,28 +22,28 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4
 
-      - name: Run scraper every minute (5x)
+      - name: Run scraper
         env:
           EMAIL: ${{ secrets.EMAIL }}
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          for i in 1 2 3 4 5; do
-            echo "--- Check $i of 5 ---"
-            python job_monitor.py || echo "Script failed, continuing..."
-            if [ $i -lt 5 ]; then
-              sleep 55
-            fi
-          done
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python job_monitor.py
 
       - name: Commit updated job IDs
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          if [ -f "jobs.txt" ]; then
+          # Only commit if jobs.txt exists AND is non-empty — this prevents
+          # a wiped jobs.txt (from a failed scrape) being committed and
+          # destroying our tracked-job state.
+          if [ -s "jobs.txt" ]; then
             git add jobs.txt
             git diff --cached --quiet || git commit -m "Update tracked job IDs"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
             git pull --rebase origin main
             git push origin HEAD:${{ github.ref }}
+          else
+            echo "Skipping commit — jobs.txt is missing or empty (scrape likely failed)"
           fi
