@@ -9,11 +9,33 @@ from bs4 import BeautifulSoup
 
 EMAIL        = os.environ["EMAIL"]
 APP_PASSWORD = os.environ["APP_PASSWORD"]
-GITHUB_TOKEN = os.environ["GH_TOKEN"]  # add this secret to TRAC5
+GITHUB_TOKEN = os.environ["GH_TOKEN"]
+
+# Optional — used to send a failure alert if scraping breaks
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://www.healthjobsuk.com/job_list/s2"
+
+# Realistic browser headers — bare User-Agent strings are getting 403'd now.
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.healthjobsuk.com/",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
 }
 
 # ── Consultant/senior grade blocklist ─────────────────────────────────────────
@@ -29,6 +51,20 @@ EXCLUDE_TITLES = [
 def is_excluded(title: str) -> bool:
     title_lower = title.lower()
     return any(word in title_lower for word in EXCLUDE_TITLES)
+
+# ── Telegram failure alert (best-effort, never raises) ────────────────────────
+def telegram_alert(message: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("ℹ️  Telegram not configured, skipping alert")
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"⚠️  Could not send Telegram alert: {e}")
 
 # ── Trigger auto-apply in TRAC5 ───────────────────────────────────────────────
 def trigger_auto_apply(job):
@@ -62,17 +98,29 @@ def save_current_job_ids(job_ids):
         f.write("\n".join(sorted(job_ids)))
 
 # ── Scrape all pages ──────────────────────────────────────────────────────────
+# Returns (jobs, ok). `ok=False` means the fetch failed and the caller must NOT
+# treat the empty list as authoritative (i.e. do not overwrite jobs.txt).
 def scrape_all_pages():
     jobs = []
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    # Warm up the session by hitting the homepage first — picks up any cookies
+    # the site sets, and makes the listing request look like a real browse.
+    try:
+        session.get("https://www.healthjobsuk.com/", timeout=15)
+    except Exception as e:
+        print(f"⚠️  Homepage warm-up failed (continuing anyway): {e}")
+
     page = 1
     while True:
         url = f"{BASE_URL}?_ts=1" if page == 1 else f"{BASE_URL}?_ts=1&_pg={page}"
         try:
-            response = requests.get(url, headers=HEADERS, timeout=15)
+            response = session.get(url, timeout=20)
             response.raise_for_status()
         except Exception as e:
             print(f"🚨 Failed to fetch page {page}: {e}")
-            break
+            return [], False  # signal failure to caller
 
         soup = BeautifulSoup(response.text, 'html.parser')
         job_links = soup.find_all('a', href=re.compile(r'^/job/'))
@@ -97,9 +145,9 @@ def scrape_all_pages():
         if not soup.find('a', title="Next page"):
             break
         page += 1
-        time.sleep(0.5)
+        time.sleep(1.0)
 
-    return jobs
+    return jobs, True
 
 # ── Send email ────────────────────────────────────────────────────────────────
 def send_email(new_jobs):
@@ -128,7 +176,19 @@ def monitor():
     previous_ids = load_previous_job_ids()
     print(f"📋 Loaded {len(previous_ids)} previously seen job IDs")
 
-    current_jobs = scrape_all_pages()
+    current_jobs, ok = scrape_all_pages()
+
+    if not ok:
+        # CRITICAL: do NOT save an empty jobs.txt — that wipes our tracked
+        # state and causes every job to look "new" once scraping recovers.
+        msg = (
+            "⚠️ NHS scraper blocked (likely 403 from healthjobsuk.com). "
+            "No jobs fetched; tracked state preserved. Check workflow logs."
+        )
+        print(msg)
+        telegram_alert(msg)
+        return
+
     current_ids = {job["ID"] for job in current_jobs}
     print(f"📋 Total jobs currently listed: {len(current_ids)}")
 
@@ -138,13 +198,12 @@ def monitor():
         print(f"🆕 {len(new_jobs)} new job(s)!")
         send_email(new_jobs)
 
-        # Trigger auto-apply for each new job that isn't a senior grade
         for job in new_jobs:
             if is_excluded(job["Title"]):
                 print(f"⏭ Skipping (senior grade): {job['Title']}")
             else:
                 trigger_auto_apply(job)
-                time.sleep(2)  # small delay between triggers
+                time.sleep(2)
     else:
         print("✅ No new jobs found")
 
