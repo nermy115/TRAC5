@@ -26,31 +26,54 @@ def is_excluded(title: str) -> bool:
 
 # ── Telegram (best-effort, never raises) ──────────────────────────────────────
 def telegram_send(message: str):
+    """Send a Telegram message. Respects 429 retry_after once, then gives up."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
     try:
-        response = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-            timeout=10,
-        )
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 429:
+            try:
+                retry_after = response.json().get("parameters", {}).get("retry_after", 30)
+            except Exception:
+                retry_after = 30
+            # Cap our wait at 90s — beyond that, we just give up on this message
+            # rather than blocking the whole workflow for minutes.
+            if retry_after <= 90:
+                print(f"⏸  Telegram rate limited; sleeping {retry_after}s then retrying once")
+                time.sleep(retry_after + 1)
+                response = requests.post(url, json=payload, timeout=10)
+            else:
+                print(f"⏸  Telegram rate limit too long ({retry_after}s) — skipping this message")
+                return
         if response.status_code != 200:
             print(f"⚠️ Telegram non-200: {response.status_code} {response.text[:200]}")
     except Exception as e:
         print(f"⚠️ Telegram send failed: {e}")
 
+# If a single run produces more than this many new (non-senior) jobs, send a
+# summary instead of flooding the chat. Prevents Telegram rate limiting.
+MAX_DETAILED_NOTIFICATIONS = 40
+
 def notify_new_jobs(new_jobs):
-    """Send new job listings via Telegram, chunked to stay under the 4096 char limit."""
-    chunk_size = 8
+    """Send new job listings via Telegram, chunked under the 4096 char limit."""
     total = len(new_jobs)
 
+    if total > MAX_DETAILED_NOTIFICATIONS:
+        telegram_send(
+            f"📋 {total} new NHS Medical/Dental jobs since the last check — "
+            f"too many to list individually.\n\n"
+            f"View them here:\n"
+            f"https://www.healthjobsuk.com/job_list/s2?_ts=1"
+        )
+        return
+
+    chunk_size = 8
     for i in range(0, total, chunk_size):
         chunk = new_jobs[i:i + chunk_size]
         header = f"🏥 New NHS Jobs ({i+1}–{min(i+chunk_size, total)} of {total})\n\n"
-        body_lines = []
-        for job in chunk:
-            label = " [Senior — skip]" if is_excluded(job['Title']) else ""
-            body_lines.append(f"• {job['Title']}{label}\n  {job['Link']}")
+        body_lines = [f"• {job['Title']}\n  {job['Link']}" for job in chunk]
         telegram_send(header + "\n\n".join(body_lines))
-        time.sleep(1)  # avoid Telegram rate limit between chunks
+        time.sleep(2)  # extra cushion under Telegram's per-chat rate limit
 
 # ── Load/save seen job IDs ────────────────────────────────────────────────────
 def load_previous_job_ids():
@@ -184,10 +207,17 @@ def monitor():
     print(f"📋 Total jobs currently listed: {len(current_ids)}")
 
     new_jobs = [job for job in current_jobs if job["ID"] not in previous_ids]
+    # Filter out senior grades — we save them to jobs.txt so we don't re-discover
+    # them, but we never notify about them.
+    notification_jobs = [job for job in new_jobs if not is_excluded(job["Title"])]
+    senior_filtered = len(new_jobs) - len(notification_jobs)
 
-    if new_jobs:
-        print(f"🆕 {len(new_jobs)} new job(s)!")
-        notify_new_jobs(new_jobs)
+    if notification_jobs:
+        print(f"🆕 {len(notification_jobs)} new job(s) to notify "
+              f"({senior_filtered} senior jobs filtered out)")
+        notify_new_jobs(notification_jobs)
+    elif new_jobs:
+        print(f"✅ No new non-senior jobs ({senior_filtered} senior jobs filtered out)")
     else:
         print("✅ No new jobs found")
 
