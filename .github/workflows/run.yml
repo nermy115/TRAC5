@@ -27,9 +27,6 @@ jobs:
 
       - name: Run scraper
         env:
-          EMAIL: ${{ secrets.EMAIL }}
-          APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python job_monitor.py
@@ -38,6 +35,9 @@ jobs:
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
+          # Only commit if jobs.txt exists AND is non-empty — this prevents
+          # a wiped jobs.txt (from a failed scrape) being committed and
+          # destroying our tracked-job state.
           if [ -s "jobs.txt" ]; then
             git add jobs.txt
             git diff --cached --quiet || git commit -m "Update tracked job IDs"
