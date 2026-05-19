@@ -102,8 +102,16 @@ def scrape_all_pages():
         except Exception as e:
             print(f"⚠️  Homepage warm-up failed (continuing anyway): {e}")
 
+        # Walk pages by incrementing ?_pg=N. Don't rely on detecting the
+        # "Next page" link in markup (it can change). Stop when either:
+        #   (a) the page returns zero job links — we're past the last page, or
+        #   (b) the page returns only jobs we've already seen this run — TRAC
+        #       silently looped us back to page 1 (e.g. past the end).
+        # max_pages is a hard safety cap so we never loop forever.
         page_num = 1
-        while True:
+        max_pages = 50
+        seen_ids = set()
+        while page_num <= max_pages:
             url = f"{BASE_URL}?_ts=1" if page_num == 1 else f"{BASE_URL}?_ts=1&_pg={page_num}"
             try:
                 response = page_obj.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -123,14 +131,19 @@ def scrape_all_pages():
             print(f"🔍 Found {len(job_links)} jobs on page {page_num}")
 
             if not job_links:
-                break
+                break  # past the last page
 
+            new_this_page = 0
             for link in job_links:
                 href = link.get('href', '').split('?')[0]
                 match = re.search(r'-(v\d+)$', href)
                 if not match:
                     continue
                 job_id = match.group(1)
+                if job_id in seen_ids:
+                    continue
+                seen_ids.add(job_id)
+                new_this_page += 1
                 title = link.get('title') or link.text.strip().split('\n')[0]
                 jobs.append({
                     "ID": job_id,
@@ -138,10 +151,15 @@ def scrape_all_pages():
                     "Link": f"https://www.healthjobsuk.com{href}"
                 })
 
-            if not soup.find('a', title="Next page"):
+            if new_this_page == 0:
+                print(f"  (page {page_num} returned only duplicates — stopping)")
                 break
+
             page_num += 1
             time.sleep(1.0)
+
+        if page_num > max_pages:
+            print(f"⚠️  Hit page safety cap ({max_pages}). May have missed jobs.")
 
         browser.close()
     return jobs, True
