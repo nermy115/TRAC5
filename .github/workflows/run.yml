@@ -1,11 +1,13 @@
 name: Job Scraper
 on:
   schedule:
-    # Every 10 minutes, 24/7. Public repos get unlimited free Actions minutes
-    # and higher scheduling priority than private repos — so this should fire
-    # reliably. workflow_dispatch is also kept so cron-job.org can be plugged
-    # in later as a fallback if GitHub scheduling gets unreliable again.
-    - cron: "*/10 * * * *"
+    # Every 10 minutes, weekdays only, 9am–7pm UK time (= UTC hours 8–17
+    # during BST; runs an hour earlier in local time during GMT/winter).
+    # Public-repo Actions minutes are unlimited, so cost isn't an issue —
+    # this is just to avoid useless overnight/weekend runs when no jobs post.
+    # workflow_dispatch is kept so cron-job.org can be plugged in later if
+    # GitHub scheduling becomes unreliable again.
+    - cron: "*/10 8-17 * * 1-5"
   workflow_dispatch:
 
 permissions:
