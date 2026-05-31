@@ -1,9 +1,12 @@
 name: Job Scraper
 on:
+  schedule:
+    # Every 10 minutes, 24/7. Public repos get unlimited free Actions minutes
+    # and higher scheduling priority than private repos — so this should fire
+    # reliably. workflow_dispatch is also kept so cron-job.org can be plugged
+    # in later as a fallback if GitHub scheduling gets unreliable again.
+    - cron: "*/10 * * * *"
   workflow_dispatch:
-  # Scheduling is now driven by cron-job.org hitting workflow_dispatch, because
-  # GitHub Actions' own `schedule:` block was running irregularly (gaps of
-  # hours instead of every 5 min). Kept workflow_dispatch as the entry point.
 
 permissions:
   contents: write
