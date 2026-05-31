@@ -50,30 +50,23 @@ def telegram_send(message: str):
     except Exception as e:
         print(f"⚠️ Telegram send failed: {e}")
 
-# If a single run produces more than this many new (non-senior) jobs, send a
-# summary instead of flooding the chat. Prevents Telegram rate limiting.
-MAX_DETAILED_NOTIFICATIONS = 40
-
 def notify_new_jobs(new_jobs):
-    """Send new job listings via Telegram, chunked under the 4096 char limit."""
+    """Send ALL new job listings via Telegram, chunked under the 4096 char limit.
+    Sleep is only inserted BETWEEN messages — single-message runs have zero
+    added delay. The 429 retry logic in telegram_send() handles any actual
+    rate limits."""
     total = len(new_jobs)
-
-    if total > MAX_DETAILED_NOTIFICATIONS:
-        telegram_send(
-            f"📋 {total} new NHS Medical/Dental jobs since the last check — "
-            f"too many to list individually.\n\n"
-            f"View them here:\n"
-            f"https://www.healthjobsuk.com/job_list/s2?_ts=1"
-        )
-        return
-
     chunk_size = 8
-    for i in range(0, total, chunk_size):
-        chunk = new_jobs[i:i + chunk_size]
+    chunks = [new_jobs[i:i + chunk_size] for i in range(0, total, chunk_size)]
+
+    for idx, chunk in enumerate(chunks):
+        i = idx * chunk_size
         header = f"🏥 New NHS Jobs ({i+1}–{min(i+chunk_size, total)} of {total})\n\n"
         body_lines = [f"• {job['Title']}\n  {job['Link']}" for job in chunk]
         telegram_send(header + "\n\n".join(body_lines))
-        time.sleep(2)  # extra cushion under Telegram's per-chat rate limit
+        # Only sleep if there's another message coming
+        if idx < len(chunks) - 1:
+            time.sleep(3)
 
 # ── Load/save seen job IDs ────────────────────────────────────────────────────
 def load_previous_job_ids():
@@ -87,9 +80,19 @@ def save_current_job_ids(job_ids):
     with open("jobs.txt", "w") as f:
         f.write("\n".join(sorted(job_ids)))
 
-# ── Scrape all pages via Playwright ───────────────────────────────────────────
-def scrape_all_pages():
-    """Returns (jobs, ok). ok=False means fetch failed — caller must NOT
+# Sort by start date, descending — newest job on page 1.
+# (TRAC's UI uses _sd=a for ascending; _sd=d should be descending. If a future
+# run shows we're scraping in the wrong direction, flip this to 'a' and scrape
+# backwards instead — but 'd' is the universal convention so we try that first.)
+SORT_QUERY = "_ts=1&_srt=startdate&_sd=d"
+
+# ── Scrape pages via Playwright ───────────────────────────────────────────────
+def scrape_all_pages(stop_at_known_ids=None):
+    """Walk pages newest-first. If `stop_at_known_ids` is provided, return as
+    soon as we encounter a job ID in that set — everything past that point is
+    older and we already know about it. Massive speedup vs. scraping all 24+
+    pages every run.
+    Returns (jobs, ok). ok=False means fetch failed — caller must NOT
     overwrite jobs.txt in that case."""
     jobs = []
     with sync_playwright() as p:
@@ -125,17 +128,16 @@ def scrape_all_pages():
         except Exception as e:
             print(f"⚠️  Homepage warm-up failed (continuing anyway): {e}")
 
-        # Walk pages by incrementing ?_pg=N. Don't rely on detecting the
-        # "Next page" link in markup (it can change). Stop when either:
-        #   (a) the page returns zero job links — we're past the last page, or
-        #   (b) the page returns only jobs we've already seen this run — TRAC
-        #       silently looped us back to page 1 (e.g. past the end).
-        # max_pages is a hard safety cap so we never loop forever.
+        # Walk pages newest-first. Stop when either:
+        #   (a) we hit a job we've already seen (everything beyond is older)
+        #   (b) the page returns zero job links — past the last page
+        #   (c) max_pages safety cap
         page_num = 1
         max_pages = 50
         seen_ids = set()
+        hit_known = False
         while page_num <= max_pages:
-            url = f"{BASE_URL}?_ts=1" if page_num == 1 else f"{BASE_URL}?_ts=1&_pg={page_num}"
+            url = f"{BASE_URL}?{SORT_QUERY}" if page_num == 1 else f"{BASE_URL}?{SORT_QUERY}&_pg={page_num}"
             try:
                 response = page_obj.goto(url, wait_until="domcontentloaded", timeout=30000)
                 status = response.status if response else 0
@@ -163,6 +165,15 @@ def scrape_all_pages():
                 if not match:
                     continue
                 job_id = match.group(1)
+
+                # Newest-first sort means: the moment we see an ID we already
+                # know about, everything past this point is older and already
+                # tracked. Stop here.
+                if stop_at_known_ids is not None and job_id in stop_at_known_ids:
+                    print(f"  ✋ Reached previously-seen job on page {page_num} — stopping")
+                    hit_known = True
+                    break
+
                 if job_id in seen_ids:
                     continue
                 seen_ids.add(job_id)
@@ -173,6 +184,9 @@ def scrape_all_pages():
                     "Title": title,
                     "Link": f"https://www.healthjobsuk.com{href}"
                 })
+
+            if hit_known:
+                break
 
             if new_this_page == 0:
                 print(f"  (page {page_num} returned only duplicates — stopping)")
@@ -192,7 +206,9 @@ def monitor():
     previous_ids = load_previous_job_ids()
     print(f"📋 Loaded {len(previous_ids)} previously seen job IDs")
 
-    current_jobs, ok = scrape_all_pages()
+    # Newest-first scrape that stops as soon as it hits a known job.
+    # Returns ONLY the new jobs (not all 1188).
+    new_jobs, ok = scrape_all_pages(stop_at_known_ids=previous_ids)
 
     if not ok:
         msg = (
@@ -203,17 +219,15 @@ def monitor():
         telegram_send(msg)
         return
 
-    current_ids = {job["ID"] for job in current_jobs}
-    print(f"📋 Total jobs currently listed: {len(current_ids)}")
+    print(f"🆕 {len(new_jobs)} new job(s) found before hitting known territory")
 
-    new_jobs = [job for job in current_jobs if job["ID"] not in previous_ids]
-    # Filter out senior grades — we save them to jobs.txt so we don't re-discover
-    # them, but we never notify about them.
+    # Filter senior grades from notifications (still saved to jobs.txt so they
+    # don't re-appear next run).
     notification_jobs = [job for job in new_jobs if not is_excluded(job["Title"])]
     senior_filtered = len(new_jobs) - len(notification_jobs)
 
     if notification_jobs:
-        print(f"🆕 {len(notification_jobs)} new job(s) to notify "
+        print(f"📨 Notifying about {len(notification_jobs)} non-senior job(s) "
               f"({senior_filtered} senior jobs filtered out)")
         notify_new_jobs(notification_jobs)
     elif new_jobs:
@@ -221,7 +235,10 @@ def monitor():
     else:
         print("✅ No new jobs found")
 
-    save_current_job_ids(current_ids)
+    # Append the new IDs to our tracked set (preserves all previously-seen IDs).
+    if new_jobs:
+        all_ids = previous_ids | {job["ID"] for job in new_jobs}
+        save_current_job_ids(all_ids)
 
 if __name__ == "__main__":
     monitor()
