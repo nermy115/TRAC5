@@ -1,11 +1,19 @@
 name: Job Scraper
 on:
-  schedule:
-    - cron: "*/5 8-17 * * 1-5"
   workflow_dispatch:
+  # Scheduling is now driven by cron-job.org hitting workflow_dispatch, because
+  # GitHub Actions' own `schedule:` block was running irregularly (gaps of
+  # hours instead of every 5 min). Kept workflow_dispatch as the entry point.
 
 permissions:
   contents: write
+
+# Only one Job Scraper run at a time. If cron-job.org fires while the previous
+# run is still going, the new one waits in queue (cancel-in-progress: false).
+# This prevents two runs from both trying to commit jobs.txt and racing.
+concurrency:
+  group: job-scraper
+  cancel-in-progress: false
 
 jobs:
   scrape:
