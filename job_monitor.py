@@ -1,16 +1,32 @@
 import os
 import re
 import time
+from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
 
 TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
+# Cloudflare Worker relay. healthjobsuk.com's WAF blocks GitHub Actions'
+# Azure IP ranges, so we fetch through a Worker running on Cloudflare IPs.
+# If these env vars are missing, we fall back to direct fetching (works
+# locally; usually 403s from GitHub Actions).
+PROXY_URL   = os.environ.get("PROXY_URL", "").rstrip("/")
+PROXY_TOKEN = os.environ.get("PROXY_TOKEN", "")
+
 BASE_URL = "https://www.healthjobsuk.com/job_list/s2"
 
-# Senior grades — still listed in notifications but flagged so you can skip them
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-GB,en;q=0.9",
+}
+
+# Senior grades — filtered out of notifications (but still tracked)
 EXCLUDE_TITLES = [
     "consultant",
     "associate specialist",
@@ -24,6 +40,23 @@ def is_excluded(title: str) -> bool:
     title_lower = title.lower()
     return any(word in title_lower for word in EXCLUDE_TITLES)
 
+# ── Page fetching ─────────────────────────────────────────────────────────────
+def fetch_html(url: str):
+    """Fetch a page, preferring the Worker relay. Returns (html, status)."""
+    try:
+        if PROXY_URL:
+            r = requests.get(
+                PROXY_URL,
+                params={"token": PROXY_TOKEN, "url": url},
+                timeout=30,
+            )
+        else:
+            r = requests.get(url, headers=BROWSER_HEADERS, timeout=30)
+        return r.text, r.status_code
+    except Exception as e:
+        print(f"Fetch error for {url}: {e}")
+        return "", 0
+
 # ── Telegram (best-effort, never raises) ──────────────────────────────────────
 def telegram_send(message: str):
     """Send a Telegram message. Respects 429 retry_after once, then gives up."""
@@ -36,35 +69,29 @@ def telegram_send(message: str):
                 retry_after = response.json().get("parameters", {}).get("retry_after", 30)
             except Exception:
                 retry_after = 30
-            # Cap our wait at 90s — beyond that, we just give up on this message
-            # rather than blocking the whole workflow for minutes.
             if retry_after <= 90:
-                print(f"⏸  Telegram rate limited; sleeping {retry_after}s then retrying once")
+                print(f"Telegram rate limited; sleeping {retry_after}s then retrying once")
                 time.sleep(retry_after + 1)
                 response = requests.post(url, json=payload, timeout=10)
             else:
-                print(f"⏸  Telegram rate limit too long ({retry_after}s) — skipping this message")
+                print(f"Telegram rate limit too long ({retry_after}s) — skipping this message")
                 return
         if response.status_code != 200:
-            print(f"⚠️ Telegram non-200: {response.status_code} {response.text[:200]}")
+            print(f"Telegram non-200: {response.status_code} {response.text[:200]}")
     except Exception as e:
-        print(f"⚠️ Telegram send failed: {e}")
+        print(f"Telegram send failed: {e}")
 
 def notify_new_jobs(new_jobs):
-    """Send ALL new job listings via Telegram, chunked under the 4096 char limit.
-    Sleep is only inserted BETWEEN messages — single-message runs have zero
-    added delay. The 429 retry logic in telegram_send() handles any actual
-    rate limits."""
+    """Send ALL new job listings via Telegram, chunked under the 4096 char limit."""
     total = len(new_jobs)
     chunk_size = 8
     chunks = [new_jobs[i:i + chunk_size] for i in range(0, total, chunk_size)]
 
     for idx, chunk in enumerate(chunks):
         i = idx * chunk_size
-        header = f"🏥 New NHS Jobs ({i+1}–{min(i+chunk_size, total)} of {total})\n\n"
+        header = f"\U0001F3E5 New NHS Jobs ({i+1}-{min(i+chunk_size, total)} of {total})\n\n"
         body_lines = [f"• {job['Title']}\n  {job['Link']}" for job in chunk]
         telegram_send(header + "\n\n".join(body_lines))
-        # Only sleep if there's another message coming
         if idx < len(chunks) - 1:
             time.sleep(3)
 
@@ -80,166 +107,154 @@ def save_current_job_ids(job_ids):
     with open("jobs.txt", "w") as f:
         f.write("\n".join(sorted(job_ids)))
 
-# Sort by start date, descending — newest job on page 1.
-# (TRAC's UI uses _sd=a for ascending; _sd=d should be descending. If a future
-# run shows we're scraping in the wrong direction, flip this to 'a' and scrape
-# backwards instead — but 'd' is the universal convention so we try that first.)
-SORT_QUERY = "_ts=1&_srt=startdate&_sd=d"
+# ── Failure-state flag (alert cooldown) ───────────────────────────────────────
+# Committed to the repo so state persists between runs:
+# - scraping starts failing -> ONE Telegram alert, flag created
+# - flag exists -> stay silent on further failures
+# - scraping recovers -> "recovered" alert, flag deleted
+FAILURE_FLAG = ".scraper_failing"
 
-# ── Scrape pages via Playwright ───────────────────────────────────────────────
-def scrape_all_pages(stop_at_known_ids=None):
-    """Walk pages newest-first. If `stop_at_known_ids` is provided, return as
-    soon as we encounter a job ID in that set — everything past that point is
-    older and we already know about it. Massive speedup vs. scraping all 24+
-    pages every run.
-    Returns (jobs, ok). ok=False means fetch failed — caller must NOT
+def is_in_failure_state():
+    return os.path.exists(FAILURE_FLAG)
+
+def mark_failure_state():
+    with open(FAILURE_FLAG, "w") as f:
+        f.write(datetime.utcnow().isoformat() + "Z\n")
+
+def clear_failure_state():
+    if os.path.exists(FAILURE_FLAG):
+        os.remove(FAILURE_FLAG)
+
+# NOTE on ordering: the server REDIRECTS sorted URLs (?_srt=...) back to plain
+# /job_list/s2 and drops the params, so we make no ordering assumptions and do
+# a full sweep of all pages (~23) every run. The site is server-rendered, so
+# plain HTTP GETs are enough — no Playwright/browser needed.
+
+# ── Scrape all pages ──────────────────────────────────────────────────────────
+def scrape_all_pages():
+    """Scrape EVERY page of the job list.
+    Returns (jobs, ok). ok=False means a fetch failed — caller must NOT
     overwrite jobs.txt in that case."""
     jobs = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 800},
-            locale="en-GB",
-            timezone_id="Europe/London",
-        )
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-        page_obj = context.new_page()
+    page_num = 1
+    max_pages = 50
+    seen_ids = set()
 
-        try:
-            page_obj.goto(
-                "https://www.healthjobsuk.com/",
-                wait_until="domcontentloaded",
-                timeout=30000,
-            )
-            time.sleep(1.5)
-        except Exception as e:
-            print(f"⚠️  Homepage warm-up failed (continuing anyway): {e}")
+    while page_num <= max_pages:
+        url = BASE_URL if page_num == 1 else f"{BASE_URL}?_pg={page_num}"
+        html, status = fetch_html(url)
+        if status != 200 or not html:
+            print(f"Failed to fetch page {page_num}: HTTP {status}")
+            return [], False
 
-        # Walk pages newest-first. Stop when either:
-        #   (a) we hit a job we've already seen (everything beyond is older)
-        #   (b) the page returns zero job links — past the last page
-        #   (c) max_pages safety cap
-        page_num = 1
-        max_pages = 50
-        seen_ids = set()
-        hit_known = False
-        while page_num <= max_pages:
-            url = f"{BASE_URL}?{SORT_QUERY}" if page_num == 1 else f"{BASE_URL}?{SORT_QUERY}&_pg={page_num}"
-            try:
-                response = page_obj.goto(url, wait_until="domcontentloaded", timeout=30000)
-                status = response.status if response else 0
-                if status >= 400:
-                    print(f"🚨 Failed to fetch page {page_num}: HTTP {status}")
-                    browser.close()
-                    return [], False
-                html = page_obj.content()
-            except Exception as e:
-                print(f"🚨 Failed to fetch page {page_num}: {e}")
-                browser.close()
-                return [], False
+        soup = BeautifulSoup(html, "html.parser")
+        job_links = soup.find_all("a", href=re.compile(r"^/job/"))
+        print(f"Found {len(job_links)} jobs on page {page_num}")
 
-            soup = BeautifulSoup(html, 'html.parser')
-            job_links = soup.find_all('a', href=re.compile(r'^/job/'))
-            print(f"🔍 Found {len(job_links)} jobs on page {page_num}")
+        if not job_links:
+            break  # past the last page
 
-            if not job_links:
-                break  # past the last page
+        new_this_page = 0
+        for link in job_links:
+            href = link.get("href", "").split("?")[0]
+            match = re.search(r"-(v\d+)$", href)
+            if not match:
+                continue
+            job_id = match.group(1)
 
-            new_this_page = 0
-            for link in job_links:
-                href = link.get('href', '').split('?')[0]
-                match = re.search(r'-(v\d+)$', href)
-                if not match:
-                    continue
-                job_id = match.group(1)
+            if job_id in seen_ids:
+                continue
+            seen_ids.add(job_id)
+            new_this_page += 1
+            title = link.get("title") or link.text.strip().split("\n")[0]
+            jobs.append({
+                "ID": job_id,
+                "Title": title,
+                "Link": f"https://www.healthjobsuk.com{href}",
+            })
 
-                # Newest-first sort means: the moment we see an ID we already
-                # know about, everything past this point is older and already
-                # tracked. Stop here.
-                if stop_at_known_ids is not None and job_id in stop_at_known_ids:
-                    print(f"  ✋ Reached previously-seen job on page {page_num} — stopping")
-                    hit_known = True
-                    break
+        if new_this_page == 0:
+            # Site repeats the last page for out-of-range page numbers
+            print(f"  (page {page_num} returned only duplicates — stopping)")
+            break
 
-                if job_id in seen_ids:
-                    continue
-                seen_ids.add(job_id)
-                new_this_page += 1
-                title = link.get('title') or link.text.strip().split('\n')[0]
-                jobs.append({
-                    "ID": job_id,
-                    "Title": title,
-                    "Link": f"https://www.healthjobsuk.com{href}"
-                })
+        page_num += 1
+        time.sleep(0.5)
 
-            if hit_known:
-                break
+    if page_num > max_pages:
+        print(f"Hit page safety cap ({max_pages}). May have missed jobs.")
 
-            if new_this_page == 0:
-                print(f"  (page {page_num} returned only duplicates — stopping)")
-                break
-
-            page_num += 1
-            time.sleep(1.0)
-
-        if page_num > max_pages:
-            print(f"⚠️  Hit page safety cap ({max_pages}). May have missed jobs.")
-
-        browser.close()
     return jobs, True
+
+# ── Retry wrapper ─────────────────────────────────────────────────────────────
+def scrape_with_retries(max_attempts=3):
+    for attempt in range(1, max_attempts + 1):
+        jobs, ok = scrape_all_pages()
+        if ok:
+            if attempt > 1:
+                print(f"Succeeded on attempt {attempt}/{max_attempts}")
+            return jobs, True
+        if attempt < max_attempts:
+            wait = 20 * attempt
+            print(f"Attempt {attempt}/{max_attempts} failed. Waiting {wait}s before retry...")
+            time.sleep(wait)
+    return [], False
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def monitor():
-    previous_ids = load_previous_job_ids()
-    print(f"📋 Loaded {len(previous_ids)} previously seen job IDs")
+    if PROXY_URL:
+        print("Fetching via Cloudflare Worker relay")
+    else:
+        print("PROXY_URL not set — fetching directly (may 403 on GitHub Actions)")
 
-    # Newest-first scrape that stops as soon as it hits a known job.
-    # Returns ONLY the new jobs (not all 1188).
-    new_jobs, ok = scrape_all_pages(stop_at_known_ids=previous_ids)
+    previous_ids = load_previous_job_ids()
+    print(f"Loaded {len(previous_ids)} previously seen job IDs")
+
+    all_jobs, ok = scrape_with_retries()
 
     if not ok:
-        msg = (
-            "⚠️ NHS scraper blocked (likely 403 from healthjobsuk.com). "
-            "No jobs fetched; tracked state preserved. Check workflow logs."
-        )
-        print(msg)
-        telegram_send(msg)
+        if is_in_failure_state():
+            print("Scraper still failing. Alert already sent — staying silent.")
+        else:
+            msg = (
+                "⚠️ NHS scraper failing (fetch errors from healthjobsuk.com) — all "
+                "retries failed. Tracked state preserved. You'll get one "
+                "'recovered' message when it's working again."
+            )
+            print(msg)
+            telegram_send(msg)
+            mark_failure_state()
         return
 
-    print(f"🆕 {len(new_jobs)} new job(s) found before hitting known territory")
+    if is_in_failure_state():
+        telegram_send("✅ NHS scraper recovered and is working again.")
+        clear_failure_state()
 
-    # Filter senior grades from notifications (still saved to jobs.txt so they
-    # don't re-appear next run).
+    new_jobs = [job for job in all_jobs if job["ID"] not in previous_ids]
+    print(f"{len(new_jobs)} new job(s) out of {len(all_jobs)} scraped")
+
+    # First-ever run (empty jobs.txt): seed silently, don't spam ~1,100 jobs.
+    if not previous_ids:
+        print("First run — seeding jobs.txt without notifications")
+        save_current_job_ids({job["ID"] for job in all_jobs})
+        return
+
     notification_jobs = [job for job in new_jobs if not is_excluded(job["Title"])]
     senior_filtered = len(new_jobs) - len(notification_jobs)
 
     if notification_jobs:
-        print(f"📨 Notifying about {len(notification_jobs)} non-senior job(s) "
+        print(f"Notifying about {len(notification_jobs)} non-senior job(s) "
               f"({senior_filtered} senior jobs filtered out)")
         notify_new_jobs(notification_jobs)
     elif new_jobs:
-        print(f"✅ No new non-senior jobs ({senior_filtered} senior jobs filtered out)")
+        print(f"No new non-senior jobs ({senior_filtered} senior jobs filtered out)")
     else:
-        print("✅ No new jobs found")
+        print("No new jobs found")
 
-    # Append the new IDs to our tracked set (preserves all previously-seen IDs).
     if new_jobs:
         all_ids = previous_ids | {job["ID"] for job in new_jobs}
         save_current_job_ids(all_ids)
 
 if __name__ == "__main__":
     monitor()
-    print("🏁 Done")
+    print("Done")
