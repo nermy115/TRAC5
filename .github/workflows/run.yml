@@ -33,30 +33,33 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          playwright install chromium
-          playwright install-deps chromium
+        run: pip install -r requirements.txt
 
       - name: Run scraper
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PROXY_URL: ${{ secrets.PROXY_URL }}
+          PROXY_TOKEN: ${{ secrets.PROXY_TOKEN }}
         run: python job_monitor.py
 
-      - name: Commit updated job IDs
+      - name: Commit updated state
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          # Only commit if jobs.txt exists AND is non-empty — this prevents
-          # a wiped jobs.txt (from a failed scrape) being committed and
-          # destroying our tracked-job state.
+          # Stage jobs.txt only if non-empty (don't commit a wiped file).
           if [ -s "jobs.txt" ]; then
             git add jobs.txt
-            git diff --cached --quiet || git commit -m "Update tracked job IDs"
+          fi
+          # Stage the failure-state flag file. -A picks up additions AND
+          # deletions, so this commits "started failing" and "recovered"
+          # transitions equally well.
+          git add -A .scraper_failing 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No state changes to commit"
+          else
+            git commit -m "Update tracker state"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
             git pull --rebase origin main
             git push origin HEAD:${{ github.ref }}
-          else
-            echo "Skipping commit — jobs.txt is missing or empty (scrape likely failed)"
           fi
