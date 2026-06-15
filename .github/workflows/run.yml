@@ -7,7 +7,7 @@ on:
     # this is just to avoid useless overnight/weekend runs when no jobs post.
     # workflow_dispatch is kept so cron-job.org can be plugged in later if
     # GitHub scheduling becomes unreliable again.
-    - cron: "*/10 8-17 * * 1-5"
+    - cron: "*/5 8-17 * * 1-5"
   workflow_dispatch:
 
 permissions:
